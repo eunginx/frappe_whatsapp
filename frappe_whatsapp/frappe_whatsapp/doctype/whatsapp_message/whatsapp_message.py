@@ -367,13 +367,22 @@ class WhatsAppMessage(Document):
             self.message_id = response.get("id") or response.get("message_id")
 
         except Exception as e:
-            res = frappe.flags.integration_request.json().get("error", {})
-            error_message = res.get("Error", res.get("message"))
+            # integration_request is only set when the HTTP call actually ran;
+            # errors raised in _interakt_payload (e.g. non-template reject) have
+            # no response to parse — surface the original error instead.
+            res = {}
+            ir = getattr(frappe.flags, "integration_request", None)
+            if ir is not None:
+                try:
+                    res = ir.json().get("error", {}) or {}
+                except Exception:
+                    pass
+            error_message = res.get("Error", res.get("message")) or str(e)
             frappe.get_doc(
                 {
                     "doctype": "WhatsApp Notification Log",
                     "template": "Text Message",
-                    "meta_data": frappe.flags.integration_request.json(),
+                    "meta_data": ir.json() if ir is not None else str(e),
                 }
             ).insert(ignore_permissions=True)
 
