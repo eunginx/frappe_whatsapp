@@ -8,6 +8,11 @@ from frappe.integrations.utils import make_post_request
 
 from frappe_whatsapp.utils import get_whatsapp_account, format_number
 
+# WhatsappIntegratedMarker — marks the Interakt-relay send adapter below.
+# Everything under this marker translates the app's Meta-shaped payloads to
+# Interakt's /v1/public/message/ contract (Template sends + session replies).
+WHATSAPP_INTEGRATED_MARKER = "WhatsappIntegratedMarker"
+
 class WhatsAppMessage(Document):
     def validate(self):
         self.set_whatsapp_account()
@@ -399,7 +404,7 @@ class WhatsAppMessage(Document):
         """
         to = data.get("to", "")
         if data.get("type") != "template":
-            frappe.throw(_("Interakt public API supports template messages only"))
+            return self._interakt_session_payload(to, data)
 
         template = data["template"]
         body = {
@@ -432,6 +437,39 @@ class WhatsAppMessage(Document):
             "callbackData": self.name,
             "template": body,
         }
+
+    def _interakt_session_payload(self, to, data):
+        """WhatsappIntegratedMarker — free-form session reply.
+
+        Interakt accepts Text/Image/Document/Audio/Video on the same
+        endpoint, but only inside Meta's 24-hour customer-service window
+        (the customer must have messaged within the last 24h — otherwise
+        Interakt rejects the send). Interactive lists/buttons, reactions
+        and flows have no Interakt session equivalent.
+        """
+        content_type = data.get("type")
+        payload = {
+            "fullPhoneNumber": f"+{to}" if len(to) > 10 else f"+91{to}",
+            "callbackData": self.name,
+        }
+        if content_type == "text":
+            payload["type"] = "Text"
+            payload["data"] = {"message": data["text"]["body"]}
+        elif content_type in ("image", "video", "document", "audio"):
+            media = data.get(content_type) or {}
+            payload["type"] = content_type.capitalize()
+            payload["data"] = {
+                "mediaUrl": media.get("link"),
+                "message": media.get("caption") or "",
+            }
+            if content_type == "document":
+                payload["data"]["fileName"] = media.get("filename") or "document.pdf"
+        else:
+            frappe.throw(_(
+                "Interakt relay does not support '{0}' session messages — "
+                "send a template instead"
+            ).format(content_type))
+        return payload
 
     def format_number(self, number):
         """Format number."""
