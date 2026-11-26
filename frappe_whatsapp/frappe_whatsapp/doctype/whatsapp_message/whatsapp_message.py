@@ -339,7 +339,15 @@ class WhatsAppMessage(Document):
         self.notify(data)
 
     def notify(self, data):
-        """Notify."""
+        """Send via Interakt's public message API.
+
+        Upstream builders still produce a Meta-shaped payload; this adapter
+        translates it to Interakt's Template send contract and posts to
+        `{account.url}/{account.version}/public/message/` — configure the
+        WhatsApp Account with url=https://api.interakt.ai, version=v1 and
+        the Interakt API key in `token` (sent as `Authorization: Basic`).
+        Interakt's public API only supports template sends.
+        """
         whatsapp_account = frappe.get_doc(
             "WhatsApp Account",
             self.whatsapp_account,
@@ -347,16 +355,16 @@ class WhatsAppMessage(Document):
         token = whatsapp_account.get_password("token")
 
         headers = {
-            "authorization": f"Bearer {token}",
+            "authorization": f"Basic {token}",
             "content-type": "application/json",
         }
         try:
             response = make_post_request(
-                f"{whatsapp_account.url}/{whatsapp_account.version}/{whatsapp_account.phone_id}/messages",
+                f"{whatsapp_account.url}/{whatsapp_account.version}/public/message/",
                 headers=headers,
-                data=json.dumps(data),
+                data=json.dumps(self._interakt_payload(data)),
             )
-            self.message_id = response["messages"][0]["id"]
+            self.message_id = response.get("id") or response.get("message_id")
 
         except Exception as e:
             res = frappe.flags.integration_request.json().get("error", {})
@@ -371,6 +379,51 @@ class WhatsAppMessage(Document):
 
             frappe.throw(msg=error_message, title=res.get("error_user_title", "Error"))
 
+    def _interakt_payload(self, data):
+        """Translate the Meta-shaped payload built upstream into Interakt's
+        `/v1/public/message/` contract.
+
+        `callbackData` carries this doc's name so delivery/read webhooks
+        can correlate back even before Interakt's message id is known.
+        Phone split assumes a 10-digit national number (country code is
+        whatever precedes it — pass full international digits in `to`).
+        """
+        to = data.get("to", "")
+        if data.get("type") != "template":
+            frappe.throw(_("Interakt public API supports template messages only"))
+
+        template = data["template"]
+        body = {
+            "name": template["name"],
+            "languageCode": template["language"]["code"],
+        }
+        for component in template.get("components") or []:
+            parameters = component.get("parameters") or []
+            if component.get("type") == "body":
+                body["bodyValues"] = [p.get("text", "") for p in parameters]
+            elif component.get("type") == "header":
+                for p in parameters:
+                    link = (
+                        p.get("image") or p.get("video") or p.get("document") or {}
+                    ).get("link")
+                    if link:
+                        body["headerValues"] = [link]
+                        if p.get("document"):
+                            body["fileName"] = p["document"].get("filename") or "document.pdf"
+            elif component.get("type") == "button":
+                index = component.get("index", "0")
+                body.setdefault("buttonValues", {})[index] = [
+                    p.get("text") or p.get("payload") or "" for p in parameters
+                ]
+
+        return {
+            "countryCode": f"+{to[:-10]}" if len(to) > 10 else "+91",
+            "phoneNumber": to[-10:],
+            "type": "Template",
+            "callbackData": self.name,
+            "template": body,
+        }
+
     def format_number(self, number):
         """Format number."""
         if number.startswith("+"):
@@ -380,39 +433,8 @@ class WhatsAppMessage(Document):
 
     @frappe.whitelist()
     def send_read_receipt(self):
-        data = {
-            "messaging_product": "whatsapp",
-            "status": "read",
-            "message_id": self.message_id
-        }
-
-        settings = frappe.get_doc(
-            "WhatsApp Account",
-            self.whatsapp_account,
-        )
-
-        token = settings.get_password("token")
-
-        headers = {
-            "authorization": f"Bearer {token}",
-            "content-type": "application/json",
-        }
-        try:
-            response = make_post_request(
-                f"{settings.url}/{settings.version}/{settings.phone_id}/messages",
-                headers=headers,
-                data=json.dumps(data),
-            )
-
-            if response.get("success"):
-                self.status = "marked as read"
-                self.save()
-                return response.get("success")
-
-        except Exception as e:
-            res = frappe.flags.integration_request.json().get("error", {})
-            error_message = res.get("Error", res.get("message"))
-            frappe.log_error("WhatsApp API Error", f"{error_message}\n{res}")
+        """Interakt's public API has no read-receipt endpoint — no-op."""
+        return
 
 
 def on_doctype_update():
