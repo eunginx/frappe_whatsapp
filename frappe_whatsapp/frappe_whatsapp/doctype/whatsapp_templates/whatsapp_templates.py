@@ -174,6 +174,14 @@ class WhatsAppTemplates(Document):  # nosemgrep: frappe-modifying-but-not-commit
 
             data["components"].append(button_block)
 
+        if not self._business_id:
+            # Interakt relay: templates are created/approved inside Interakt,
+            # there is no remote create endpoint to call. The local doc only
+            # mirrors the approved template so messages can reference it.
+            self.status = "Approved"  # nosemgrep: frappe-modifying-but-not-committing
+            self.db_update()
+            return
+
         try:
             response = make_post_request(
                 f"{self._url}/{self._version}/{self._business_id}/message_templates",
@@ -194,6 +202,10 @@ class WhatsAppTemplates(Document):  # nosemgrep: frappe-modifying-but-not-commit
     def update_template(self):
         """Update template to meta."""
         self.get_settings()
+        if not self._business_id:
+            # Interakt relay: template content lives in Interakt; local edits
+            # only update the mirror doc, nothing to PATCH upstream.
+            return
         data = {"components": []}
 
         body = {
